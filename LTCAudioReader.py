@@ -1,11 +1,92 @@
 import sounddevice as sd
 import numpy as np
-from threading import Lock
 # import ltc_reader
 import threading
+from threading import Lock
 import pyaudio
+import wave
+import ffmpeg
+import csv
 import audioop
+import argparse
+import os
 
+class LTCVideoProcessor:
+    """
+    Class to process a video file, extract its audio, decode LTC timecode,
+    and generate a CSV file with frame-to-timecode mapping.
+    """
+
+    def __init__(self, video_path, output_csv):
+        self.video_path = video_path
+        self.output_csv = output_csv
+        self.audio_path = "temp_audio.wav"
+        self.ltc_reader = LTCReader()
+    
+    def extract_audio(self):
+        """
+        Extracts audio from the video file and saves it as a temporary WAV file.
+        """
+        print("[INFO] Extracting audio from video...")
+        try:
+            (
+                ffmpeg.input(self.video_path)
+                .output(self.audio_path, format="wav", ac=1, ar="48000")
+                .run(quiet=True, overwrite_output=True)
+            )
+        except ffmpeg.Error as e:
+            print(f"[ERROR] Failed to extract audio: {e}")
+            exit(1)
+
+    def process_audio(self):
+        """
+        Reads the extracted audio file, decodes LTC timecode, and saves it to a CSV.
+        """
+        print("[INFO] Processing audio and extracting LTC timecodes...")
+
+        # Open audio file
+        wf = wave.open(self.audio_path, 'rb')
+        frame_rate = wf.getframerate()
+        num_frames = wf.getnframes()
+        block_size = 2048
+        
+        timecode_data = []
+
+        for i in range(0, num_frames, block_size):
+            frames = wf.readframes(block_size)
+            self.ltc_reader.decode_ltc(frames)
+            tc = self.ltc_reader.get_tc()
+
+            if tc:
+                timestamp = i / frame_rate  # Approximate time in seconds
+                timecode_data.append([timestamp, tc])
+
+        # Save timecode data to CSV
+        self.save_to_csv(timecode_data)
+        print(f"[INFO] Timecode data saved to {self.output_csv}")
+
+    def save_to_csv(self, timecode_data):
+        """
+        Saves extracted timecodes to a CSV file.
+        """
+        with open(self.output_csv, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Timestamp (s)", "Timecode"])
+            writer.writerows(timecode_data)
+    
+    def remove_temp_audio(self):
+        """
+        Removes the temporary audio file.
+        """
+        try:
+            os.remove(self.audio_path)
+        except FileNotFoundError:
+            pass
+
+    def run(self):
+        self.extract_audio()
+        self.process_audio()
+        self.remove_temp_audio()
 
 class LTCReader:
     """
@@ -164,12 +245,22 @@ class AudioReader:
     def get_current_timecode(self):
         return self.current_timecode
 
-# Example usage
+# # Example usage
+# if __name__ == "__main__":
+#     tentacle_sync = AudioReader()
+#     tentacle_sync.start()
+#     try:
+#         while True:
+#             pass
+#     except KeyboardInterrupt:
+#         tentacle_sync.stop()
+
 if __name__ == "__main__":
-    tentacle_sync = AudioReader()
-    tentacle_sync.start()
-    try:
-        while True:
-            pass
-    except KeyboardInterrupt:
-        tentacle_sync.stop()
+    # Argument parser for command-line usage
+    parser = argparse.ArgumentParser(description="Extract LTC timecode from a video file and save to CSV.")
+    parser.add_argument("--video_path", help="Path to the input video file", required=True)
+    parser.add_argument("--output_csv", help="Path to save the output CSV file", required=True)
+    args = parser.parse_args()
+
+    processor = LTCVideoProcessor(args.video_path, args.output_csv)
+    processor.run()

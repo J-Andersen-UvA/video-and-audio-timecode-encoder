@@ -1,0 +1,76 @@
+import cv2
+import pandas as pd
+import numpy as np
+from pyzbar.pyzbar import decode
+import argparse
+import re
+
+class QRExtractor:
+    """Extracts QR codes from video frames."""
+    def __init__(self, video_path):
+        self.video_path = video_path
+        self.cap = cv2.VideoCapture(video_path)
+        self.frame_rate = int(self.cap.get(cv2.CAP_PROP_FPS))
+    
+    def extract_frames(self):
+        """Yields frames from the video."""
+        while self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            yield frame, self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000  # Timestamp in seconds
+        self.cap.release()
+
+class QRProcessor:
+    """Processes frames to extract QR code timecodes."""
+    def extract_qr_timecode(self, frame):
+        """Decodes QR code from the frame and returns extracted timecode."""
+        qr_codes = decode(frame)
+        
+        for qr in qr_codes:
+            if qr.type == 'QRCODE':
+                qr_data = qr.data.decode("utf-8")
+                qr_data = self.fix_qr_data(qr_data)
+                if self.is_valid_timecode(qr_data):
+                    return qr_data
+        return None
+
+    def fix_qr_data(self, qr_data):
+        if qr_data[0] == '[' and qr_data[-1] == ']':
+            qr_data = qr_data[1:-1]
+        if qr_data[0] == '"' and qr_data[-1] == '"':
+            qr_data = qr_data[1:-1]
+        
+        return qr_data
+
+    def is_valid_timecode(self, data):
+        """Validates if the extracted data is a timecode format HH:MM:SS:FF."""
+        return bool(re.match(r"\d{2}:\d{2}:\d{2}:\d{2}", data))
+
+class VideoQRTimecodeProcessor:
+    """Combines QR extraction & processing to generate a CSV."""
+    def __init__(self, video_path, output_csv):
+        self.video_path = video_path
+        self.output_csv = output_csv
+        self.qr_extractor = QRExtractor(video_path)
+        self.qr_processor = QRProcessor()
+
+    def process_video(self):
+        """Processes video and saves timecodes to CSV."""
+        with open(self.output_csv, 'w') as f:
+            f.write("timestamp,timecode\n")
+            for frame, timestamp in self.qr_extractor.extract_frames():
+                timecode = self.qr_processor.extract_qr_timecode(frame)
+                if timecode:
+                    f.write(f"{timestamp},{timecode}\n")
+        print(f"[INFO] Timecode CSV saved to {self.output_csv}")
+
+# Example usage
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Extract LTC timecode from a video file and save to CSV.")
+    parser.add_argument("--video_path", help="Path to the input video file", required=True)
+    parser.add_argument("--output_csv", help="Path to save the output CSV file", required=True)
+    args = parser.parse_args()
+
+    processor = VideoQRTimecodeProcessor(args.video_path, args.output_csv)
+    processor.process_video()

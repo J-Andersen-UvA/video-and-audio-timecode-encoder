@@ -58,7 +58,7 @@ class VideoQRTimecodeProcessor:
     def process_video(self):
         """Processes video and saves timecodes to CSV."""
         with open(self.output_csv, 'w') as f:
-            f.write("timestamp,timecode\n")
+            f.write("Timestamps,Timecodes\n")
             for frame, timestamp in self.qr_extractor.extract_frames():
                 timecode = self.qr_processor.extract_qr_timecode(frame)
                 if timecode:

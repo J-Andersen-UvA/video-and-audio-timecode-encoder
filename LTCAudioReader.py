@@ -71,7 +71,7 @@ class LTCVideoProcessor:
         """
         with open(self.output_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["Timestamp (s)", "Timecode"])
+            writer.writerow(["Timestamps", "Timecodes"])
             writer.writerows(timecode_data)
     
     def remove_temp_audio(self):

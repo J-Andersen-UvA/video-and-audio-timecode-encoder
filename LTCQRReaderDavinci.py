@@ -5,6 +5,8 @@ from pyzbar.pyzbar import decode
 import argparse
 import re
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 class QRExtractor:
     """Extracts QR codes from video frames."""
@@ -27,16 +29,33 @@ class QRExtractor:
 
 class QRProcessor:
     """Processes frames to extract QR code timecodes."""
+    def __init__(self):
+        self.qr_cache = {}
+        self.qr_decoder = cv2.QRCodeDetector()
+
     def extract_qr_timecode(self, frame):
-        """Decodes QR code from the frame and returns extracted timecode."""
-        qr_codes = decode(frame)
-        for qr in qr_codes:
-            if qr.type == 'QRCODE':
-                qr_data = qr.data.decode("utf-8").strip()
-                qr_data = self.fix_qr_data(qr_data)
-                if self.is_valid_timecode(qr_data):
-                    return qr_data
+        """Decodes QR code from a frame using GPU acceleration."""
+        frame_hash = self.hash_frame(frame)
+
+        if frame_hash in self.qr_cache:
+            return self.qr_cache[frame_hash]
+
+        # Use OpenCV's QR Code Detector (CPU-based, but optimized)
+        retval, decoded_info, points, straight_qrcode = self.qr_decoder.detectAndDecodeMulti(frame)
+
+        if retval and decoded_info[0]:  # If QR code found
+            qr_data = decoded_info[0].strip()
+            qr_data = self.fix_qr_data(qr_data)
+            if self.is_valid_timecode(qr_data):
+                self.qr_cache[frame_hash] = qr_data
+                return qr_data
+
+        self.qr_cache[frame_hash] = None
         return None
+
+    def hash_frame(self, frame):
+        """Simple hash to detect duplicate frames."""
+        return cv2.mean(frame)
 
     def fix_qr_data(self, qr_data):
         if qr_data.startswith("[") and qr_data.endswith("]"):
@@ -56,6 +75,74 @@ class VideoQRTimecodeProcessor:
         self.output_csv = output_csv
         self.qr_extractor = QRExtractor(video_path)
         self.qr_processor = QRProcessor()
+    
+    def process_frame(self, frame):
+        frame = cv2.resize(frame, (frame.shape[1] // 2, frame.shape[0] // 2))
+        return self.qr_processor.extract_qr_timecode(frame)
+
+    def process_video_threaded(self):
+        """Processes video and saves timecodes to CSV in DaVinci Resolve format using threading."""
+        video_filename = os.path.basename(self.video_path)
+        video_dir = os.path.dirname(self.video_path)
+        
+        frame_rate = self.qr_extractor.frame_rate
+        resolution = self.qr_extractor.resolution
+
+        # Prepare CSV header
+        headers = [
+            "File Name", "Clip Directory", "Duration TC", "Frame Rate", "Audio Sample Rate", 
+            "Audio Channels", "Resolution", "Video Codec", "Audio Codec", 
+            "Start TC", "End TC", "Start Frame", "End Frame", "Frames", 
+            "Bit Depth", "Field Dominance", "Data Level", "Audio Bit Depth", "Date Modified"
+        ]
+
+        data = []
+        prev_timecode = None
+        start_frame = None
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_frame = {}  # Map future results to frame numbers
+
+            # Submit frame processing tasks
+            for frame, timestamp in self.qr_extractor.extract_frames():
+                future = executor.submit(self.process_frame, frame)
+                future_to_frame[future] = timestamp  # Store timestamp with each future
+
+            # Process completed futures
+            for future in future_to_frame:
+                timecode = future.result()
+                timestamp = future_to_frame[future]
+                current_frame = int(timestamp * frame_rate)
+
+                if timecode:
+                    if prev_timecode is None:
+                        prev_timecode = timecode
+                        start_frame = current_frame
+                    elif timecode != prev_timecode:
+                        # Save previous segment
+                        data.append([
+                            video_filename, video_dir, "", frame_rate, "48000", "2", resolution, "H.264", "AAC",
+                            prev_timecode, timecode, start_frame, current_frame - 1, (current_frame - start_frame),
+                            "8", "", "", "16", ""
+                        ])
+                        # Start new segment
+                        prev_timecode = timecode
+                        start_frame = current_frame
+
+        # Save last segment
+        if prev_timecode:
+            data.append([
+                video_filename, video_dir, "", frame_rate, "48000", "2", resolution, "H.264", "AAC",
+                prev_timecode, prev_timecode, start_frame, self.qr_extractor.total_frames - 1, 
+                (self.qr_extractor.total_frames - start_frame), "8", "", "", "16", ""
+            ])
+
+        # Save to CSV
+        df = pd.DataFrame(data, columns=headers)
+        df.to_csv(self.output_csv, index=False)
+
+        print(f"[INFO] DaVinci Resolve CSV saved to {self.output_csv}")
+
 
     def process_video(self):
         """Processes video and saves timecodes to CSV in DaVinci Resolve format."""
@@ -90,9 +177,9 @@ class VideoQRTimecodeProcessor:
                 elif timecode != prev_timecode:
                     # Save previous segment
                     data.append([
-                        video_filename, video_dir, "", frame_rate, "48000", "2", resolution, "H.264", "AAC",
+                        video_filename, video_dir, "", frame_rate, "48000", "2", "", "H.264", "AAC",
                         prev_timecode, timecode, start_frame, current_frame - 1, (current_frame - start_frame),
-                        "8", "", "Legal", "16", ""
+                        "8", "", "", "16", ""
                     ])
                     # Start new segment
                     prev_timecode = timecode
@@ -101,9 +188,9 @@ class VideoQRTimecodeProcessor:
         # Save last segment
         if prev_timecode:
             data.append([
-                video_filename, video_dir, "", frame_rate, "48000", "2", resolution, "H.264", "AAC",
+                video_filename, video_dir, "", frame_rate, "48000", "2", "", "H.264", "AAC",
                 prev_timecode, prev_timecode, start_frame, self.qr_extractor.total_frames - 1, (self.qr_extractor.total_frames - start_frame),
-                "8", "", "Legal", "16", ""
+                "8", "", "", "16", ""
             ])
 
         # Save to CSV
@@ -116,8 +203,13 @@ class VideoQRTimecodeProcessor:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract QR timecode from a video file and save to DaVinci Resolve CSV.")
     parser.add_argument("--video_path", help="Path to the input video file", required=True)
-    parser.add_argument("--output_csv", help="Path to save the output CSV file", required=True)
+    parser.add_argument("--output_csv", help="Path to save the output CSV file", required=False)
     args = parser.parse_args()
 
+    if not args.output_csv:
+        args.output_csv = os.path.splitext(args.video_path)[0] + "_timecodes.csv"
+
     processor = VideoQRTimecodeProcessor(args.video_path, args.output_csv)
-    processor.process_video()
+    cur_time = time.time()
+    processor.process_video_threaded()
+    print(f"[INFO] Processing time THREADED: {time.time() - cur_time:.2f} seconds")
